@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use tokio::{net::TcpListener, task::JoinError};
 
 enum Status {
@@ -19,7 +19,18 @@ async fn work(s: SocketAddr) {
 
 #[tokio::main]
 async fn main() -> Result<(), JoinError> {
-    println!("starting rec2rec!");
+    // this is a list of peers to connect to
+    // in the future, we would like to build this list dynamically
+    // for now, we are starting our implementation by enumerating peers
+    let _peers: Vec<SocketAddrV4> = vec![
+        SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8080),
+        SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8081),
+        SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8082),
+        SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8083),
+        SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8084),
+    ];
+
+    println!("starting rec2rec!!!");
     // config
     tokio::spawn(async move {
         let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
