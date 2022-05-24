@@ -24,11 +24,6 @@ struct Args {
     bind_address: String,
 }
 
-// TODO: parse the bind_address
-fn parse_bind_address(input: String) -> io::Result<SocketAddrV4> {
-    todo!();
-}
-
 async fn work(s: SocketAddr) {
     println!("doing work! with {}", s);
 }
@@ -36,7 +31,6 @@ async fn work(s: SocketAddr) {
 #[tokio::main]
 async fn main() -> Result<(), JoinError> {
     let args: Args = Args::parse();
-    dbg!(args);
 
     // this is a list of peers to connect to
     // in the future, we would like to build this list dynamically
@@ -65,7 +59,7 @@ async fn main() -> Result<(), JoinError> {
     println!("starting rec2rec!!!");
     // config
     tokio::spawn(async move {
-        let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
+        let listener = TcpListener::bind(args.bind_address).await.unwrap();
         println!("started listening to lo:8080");
         loop {
             let (_, addr) = listener.accept().await.unwrap();
