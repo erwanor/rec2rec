@@ -58,9 +58,10 @@ async fn main() -> Result<(), JoinError> {
 
     println!("starting rec2rec!!!");
     // config
+    let bind_address = args.bind_address;
     tokio::spawn(async move {
-        let listener = TcpListener::bind(args.bind_address).await.unwrap();
-        println!("started listening to lo:8080");
+        let listener = TcpListener::bind(&bind_address).await.unwrap();
+        println!("started listening on {bind_address}");
         loop {
             let (_, addr) = listener.accept().await.unwrap();
             tokio::spawn(work(addr));
