@@ -253,6 +253,7 @@ dependencies = [
 name = "rec2rec"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "clap",
  "tokio",
 ]

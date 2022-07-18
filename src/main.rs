@@ -1,21 +1,96 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
+use bytes::{Buf, BufMut, BytesMut};
 use clap::Parser;
-use std::io;
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use core::fmt;
+use std::fmt::{Debug, Formatter};
+use std::io::{self, Cursor};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs};
+use std::str::FromStr;
+use tokio::io::BufWriter;
+use tokio::sync::mpsc;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     task::JoinError,
 };
 
-enum Status {
-    Up,
-    Down,
+#[derive(Debug)]
+enum State {
+    Offline,
+    Syncing,
+    Connected,
+}
+
+struct Peer {
+    addr: SocketAddrV4,
+    state: State,
+    connection: Connection,
+}
+
+impl Debug for Peer {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("peer")
+            .field(&self.addr)
+            .field(&self.state)
+            .finish()
+    }
+}
+
+struct Connection {
+    stream: BufWriter<TcpStream>,
+    buffer: BytesMut,
+}
+
+impl Connection {
+    fn new(s: TcpStream) -> Self {
+        Self {
+            stream: BufWriter::new(s),
+            buffer: BytesMut::with_capacity(1024),
+        }
+    }
+
+    async fn write_message(&mut self, m: Message) -> io::Result<()> {
+        match m {
+            Message::Ping => {
+                // self.stream.write_u8(b'>').await?;
+                self.stream.write_all("PING".as_bytes()).await?;
+            }
+            Message::Pong => {
+                // self.stream.write_u8(b'>').await?;
+                self.stream.write_all("PONG".as_bytes()).await?;
+            }
+        }
+        self.stream.write_all(b"\r\n").await?;
+        Ok(())
+    }
+
+    pub async fn read_message(&mut self) -> Option<Message> {
+        loop {
+            if let Some(message) = self.parse_message().await {
+                return Some(message);
+            }
+
+            let num_bytes = self.stream.read_buf(&mut self.buffer).await.unwrap();
+            if num_bytes == 0 {
+                if self.buffer.is_empty() {
+                    return None;
+                } else {
+                    // connection reset by peer
+                    return None;
+                }
+            }
+        }
+    }
+
+    async fn parse_message(&mut self) -> Option<Message> {
+        let mut buf = Cursor::new(&self.buffer[..]);
+        Message::check(&mut buf)
+    }
 }
 
 struct Node {
-    status: Status,
+    peers: Vec<Peer>,
     address: Ipv4Addr,
 }
 
@@ -25,99 +100,135 @@ struct Args {
 }
 
 #[derive(Debug)]
-enum Messages {
+enum Message {
     Ping,
     Pong,
 }
 
-/// This handles incoming connections to our listener
-///
-/// Currently, it listens for "ping" and says "pong".
-async fn work(mut stream: TcpStream, s: SocketAddr) {
-    println!("got connection from {s}!");
-
-    println!("server reading string");
-    let mut buffer = [0; 10];
-    let _characters_recieved = stream
-        .read(&mut buffer)
-        .await
-        .expect("could not read message");
-
-    // TODO: it seems like we never reach this point
-    println!("done reading string");
-
-    dbg!(buffer);
-
-    // if buffer != b"ping" {
-    //     panic!("did not get ping: {buffer}");
-    // }
-
-    stream
-        .write_all(b"pong\n")
-        .await
-        .expect("failed to write to client stream");
+#[derive(Debug)]
+enum Error {
+    Incomplete,
 }
 
-/// This handles incoming connections to our listener
-///
-/// Currently, it says "ping".
-async fn client_work(mut stream: TcpStream) {
-    stream
-        .write_all(b"ping\n")
-        .await
-        .expect("failed to write to stream");
-
-    println!("i sent a ping to {stream:?}");
-
-    // should we wait a bit after sending the ping?
-    // better, can we wait until we recieve data?
-    let mut buffer = String::new();
-    let characters_recieved = stream
-        .read_to_string(&mut buffer)
-        .await
-        .expect("could not read message");
-
-    dbg!(&buffer);
-    dbg!(characters_recieved);
-
-    if buffer != "pong" {
-        panic!("did not get pong: {buffer}");
+fn read_line<'a>(src: &mut Cursor<&'a [u8]>) -> Result<&'a [u8], Error> {
+    let start = src.position() as usize;
+    let end = src.get_ref().len() - 1;
+    for i in start..end {
+        if src.get_ref()[i] == b'\r' && src.get_ref()[i + 1] == b'\n' {
+            src.set_position((i + 2) as u64);
+            return Ok(&src.get_ref()[start..i]);
+        }
     }
+
+    Err(Error::Incomplete)
+}
+
+impl Message {
+    pub fn check(src: &mut Cursor<&[u8]>) -> Option<Message> {
+        match src.get_u8() {
+            b'>' => {
+                let line = read_line(src).unwrap();
+                let message = String::from_utf8(line.to_vec()).unwrap();
+                match message.as_str() {
+                    "PING" => Some(Message::Ping),
+                    "PONG" => Some(Message::Pong),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+impl Peer {
+    fn new(addr: SocketAddrV4, stream: TcpStream) -> Self {
+        Self {
+            addr,
+            state: State::Offline,
+            connection: Connection::new(stream),
+        }
+    }
+
+    pub async fn ping(&mut self) -> io::Result<()> {
+        self.connection.write_message(Message::Ping).await
+    }
+}
+
+enum Command {
+    AddPeer(Peer),
+    MessageReceived(SocketAddrV4, Message),
+    Quit,
+}
+
+async fn client(mut rx: mpsc::Receiver<Command>) {
+    let mut peers: Vec<Peer> = Vec::with_capacity(128);
+    loop {
+        tokio::select! {
+            Some(command) = rx.recv() => {
+                match command {
+                    Command::AddPeer(mut peer) => {
+                        println!("found new peer: {peer:?}");
+                        tokio::spawn(async move {
+                            loop {
+                                peer.listen().await;
+                            }
+                        });
+                        peer.ping().await;
+                    },
+                    Command::MessageReceived(from, msg) => {
+                        println!("{from:?} sent {msg:?}");
+                    },
+                    _ => {},
+                }
+            }
+        }
+    }
+}
+
+fn peering(p: Peer) -> () {
+    unimplemented!()
 }
 
 #[tokio::main]
 async fn main() {
     let args: Args = Args::parse();
 
-    let bind_address = args.bind_address;
+    let local_address = args.bind_address.clone();
+
+    let (tx, rx) = mpsc::channel(1);
+    let tx2 = tx.clone();
+    tokio::spawn(client(rx));
+
     let listener = tokio::spawn(async move {
-        let listener = TcpListener::bind(&bind_address).await.unwrap();
-        println!("started listening on {bind_address}");
+        let listener = TcpListener::bind(&local_address).await.unwrap();
+        println!("started listening on {local_address}");
         loop {
             let (stream, addr) = listener.accept().await.unwrap();
-            tokio::spawn(work(stream, addr));
+            if let SocketAddr::V4(a) = addr {
+                tx2.send(Command::AddPeer(Peer::new(a, stream))).await;
+            }
         }
     });
 
-    // this is a list of peers to connect to
-    // in the future, we would like to build this list dynamically
-    // for now, we are starting our implementation by enumerating peers
+    let local_address = args.bind_address.parse::<SocketAddrV4>().unwrap();
+
     let peers: Vec<SocketAddrV4> = vec![
-        SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8080), // ourself!
+        SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8080),
         SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8081),
-        SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8082),
-        SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8083),
-        SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8084),
     ];
 
-    // attempt to connect to all peers
     for peer in peers {
+        if peer == local_address {
+            continue;
+        }
+
         let stream = TcpStream::connect(&peer);
 
         match stream.await {
-            // this is sending outgoing client connections
             Ok(stream) => {
-                tokio::spawn(client_work(stream));
+                println!("connecting to {peer:#}");
+                let cmd = Command::AddPeer(Peer::new(peer, stream));
+                tx.send(cmd).await;
                 continue;
             }
             Err(e) => {
@@ -127,15 +238,5 @@ async fn main() {
         }
     }
 
-    println!("starting rec2rec!!!");
-
-    // config
-
-    // once we have additional tasks, we would await them here as well
-    // we may need to join all of the futures together
     let _ = listener.await;
-
-    // currently our tokio task runs forever
-    // when we connect to listeners, we want to also continue listening
-    // we need to run both client connections and the listener at the same time
 }
