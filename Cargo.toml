@@ -5,7 +5,32 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[[bin]]
+name = "msg"
+path = "src/send_msg.rs"
+
+[[bin]]
+name = "bad_msg"
+path = "src/send_invalid_msg.rs"
+
+[[bin]]
+name = "zero_msg"
+path = "src/send_zero_msg.rs"
+
+[[bin]]
+name = "big_valid"
+path = "src/send_big_valid_msg.rs"
+
+[[bin]]
+name = "big_invalid"
+path = "src/send_big_invalid_msg.rs"
+
+
 [dependencies]
 tokio = { version = "1.18.2", features = ["full"] }
 clap = { version = "3.1", features = ["derive"] }
 bytes = "1"
+anyhow = "1.0.58"
+thiserror = "1"
+tokio-util = { version = "0.7.3", features = [ "codec" ]}
+futures = "0.3.21"
