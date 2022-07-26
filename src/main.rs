@@ -9,6 +9,7 @@ use std::fmt::{Debug, Formatter};
 use std::io::{self, Cursor};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs};
 use std::str::FromStr;
+use std::sync::Arc;
 use tokio::io::BufWriter;
 use tokio::sync::mpsc;
 use tokio::{
@@ -16,6 +17,8 @@ use tokio::{
     net::{TcpListener, TcpStream},
     task::JoinError,
 };
+use tracing::{info, Level};
+use tracing_subscriber::FmtSubscriber;
 mod connection;
 mod message;
 mod peer;
@@ -37,60 +40,40 @@ enum Command {
     Quit,
 }
 
-async fn peer_handler(mut peer: Peer) -> anyhow::Result<()> {
+async fn peer_handler(mut tx: Arc<mpsc::Sender<Command>>, mut peer: Peer) {
+    peer.ping().await;
     loop {
-        let msg = peer.read().await.unwrap();
-        match msg {
-            Some(Message::Ping) => {
-                peer.pong().await?
-            },
-            Some(Message::Pong) => {
-                println!("HANDSHAKE COMPLETED!")
-            },
-            Some(_) => todo!(),
-            None => {}
+        match peer.read().await {
+            Ok(Some(Message::Ping)) => {
+                // tx.send(Command::MessageReceived(peer.addr, Message::Ping));
+                peer.pong().await;
+            }
+            Ok(Some(Message::Pong)) => {
+                info!("HANDSHAKE COMPLETED!")
+            }
+            Ok(Some(Message::Info(msg))) => {
+                info!("peer_handler: received info {msg}");
+            }
+            Ok(None) => info!("peer_handler for {peer:?} Ok(None)'d"),
+            Err(e) => {
+                info!("error: {e:?}");
+                break;
+            }
         }
     }
 }
 
-async fn client(mut rx: mpsc::Receiver<Command>) {
-    let mut peers: Vec<Peer> = Vec::with_capacity(128);
+async fn client(mut tx: Arc<mpsc::Sender<Command>>, mut rx: mpsc::Receiver<Command>) {
     loop {
         tokio::select! {
             Some(command) = rx.recv() => {
                 match command {
-                    Command::AddPeer(mut peer) => {
-                        println!("found new peer: {peer:?}");
-
-                        // Peer handler
-                        tokio::spawn(async move {
-                            peer.ping().await;
-                            loop {
-                                println!("handler for peer {:?}...", peer);
-                                match peer.read().await {
-                                    Ok(Some(msg)) => match msg {
-                                        Message::Ping => {
-                                            peer.pong().await;
-                                        },
-                                        Message::Pong => {
-                                            println!("HANDSHAKE COMPLETED!");
-                                        },
-                                        Message::Info(m) => {
-                                            println!("received info message: {m}");
-                                        }
-                                    },
-                                    Ok(None) => {},
-                                    Err(e) => {
-                                        println!("e: {e:?}");
-                                        println!("Tearing down peer handler");
-                                        break
-                                    }
-                                }
-                            }
-                        });
+                    Command::AddPeer(peer) => {
+                        info!("found new peer: {peer:?}");
+                        tokio::spawn(peer_handler(tx.clone(), peer));
                     },
                     Command::MessageReceived(from, msg) => {
-                        println!("{from:?} sent {msg:?}");
+                        info!("{from:?} sent {msg:?}");
                     },
                     _ => {},
                 }
@@ -105,21 +88,32 @@ fn peering(p: Peer) -> () {
 
 #[tokio::main]
 async fn main() {
+    // a builder for `FmtSubscriber`.
+    let subscriber = FmtSubscriber::builder()
+        // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
+        // will be written to stdout.
+        .with_max_level(Level::TRACE)
+        // completes the builder.
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+
     let args: Args = Args::parse();
 
     let local_address = args.bind_address.clone();
 
     let (tx, rx) = mpsc::channel(1);
+    let tx = Arc::new(tx);
     let tx2 = tx.clone();
-    tokio::spawn(client(rx));
+    tokio::spawn(client(tx.clone(), rx));
 
     let listener = tokio::spawn(async move {
         let listener = TcpListener::bind(&local_address).await.unwrap();
-        println!("started listening on {local_address}");
+        info!("started listening on {local_address}");
         loop {
             let (stream, addr) = listener.accept().await.unwrap();
             if let SocketAddr::V4(a) = addr {
-                tx2.send(Command::AddPeer(Peer::new(a, stream))).await;
+                tx.send(Command::AddPeer(Peer::new(a, stream))).await;
             }
         }
     });
@@ -140,13 +134,13 @@ async fn main() {
 
         match stream.await {
             Ok(stream) => {
-                println!("connecting to {peer:#}");
+                info!("connecting to {peer:#}");
                 let cmd = Command::AddPeer(Peer::new(peer, stream));
-                tx.send(cmd).await;
+                tx2.send(cmd).await;
                 continue;
             }
             Err(e) => {
-                eprintln!("unable to connect to {peer}: {e}");
+                info!("unable to connect to {peer}: {e}");
                 continue;
             }
         }

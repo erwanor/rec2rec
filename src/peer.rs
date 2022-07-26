@@ -1,3 +1,4 @@
+use tracing::info;
 use std::fmt::{Debug, Formatter};
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs};
@@ -41,7 +42,7 @@ impl Debug for Peer {
 
 impl Drop for Peer {
     fn drop(&mut self) {
-        println!("tearing down peer {:?}", self.addr);
+        info!("tearing down peer {:?}", self.addr);
         drop(self)
     }
 }
@@ -57,18 +58,17 @@ impl Peer {
     }
 
     pub async fn ping(&mut self) -> io::Result<()> {
-        println!("pinging!");
+        info!("pinging!");
         self.connection.write_message(Message::Ping).await
     }
 
     pub async fn pong(&mut self) -> io::Result<()> {
-        println!("ponging!");
+        info!("ponging!");
         self.connection.write_message(Message::Pong).await
     }
 
     pub async fn read(&mut self) -> Result<Option<Message>, Error> {
-        println!("read_message:");
+        info!("read_message:");
         self.connection.read_message().await
     }
 }
-

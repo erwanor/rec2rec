@@ -1,4 +1,5 @@
 use anyhow;
+use tracing::info;
 use bytes::{Buf, BufMut, BytesMut};
 use std::io::{self, Cursor};
 use thiserror;
@@ -43,7 +44,17 @@ impl Encoder<Message> for MessageCodec {
                 dst.put_u8(b'>');
                 dst.extend_from_slice("PONG".as_bytes());
             }
-            _ => todo!()
+            Message::Info(s) => {
+                if s.len() > MAX_FRAME_LENGTH {
+                    // TODO: clean up error propagation / use the correct variant
+                    return Err(io::Error::new(io::ErrorKind::Other, "toooooo lonnnngggggg"));
+                }
+
+                let len = s.len() as u8;
+                dst.put_u8(b'*');
+                dst.put_u8(len);
+                dst.put_slice(s.as_bytes());
+            }
         }
 
         dst.extend_from_slice("\r\n".as_bytes());
@@ -70,34 +81,28 @@ impl Decoder for MessageCodec {
                         let content = String::from_utf8(src[1..frame_length - 2].to_vec()).unwrap();
                         match content.as_str() {
                             "PING" => {
-                                println!("PING frame size: {frame_length}");
                                 src.advance(frame_length);
                                 return Ok(Some(Message::Ping));
                             }
                             "PONG" => {
-                                println!("PONG frame size: {frame_length}");
                                 src.advance(frame_length);
                                 return Ok(Some(Message::Pong));
                             }
                             "VARLEN" => {
-                                println!("VARLEN frame size: {frame_length}");
                                 src.advance(frame_length);
-                                println!("Received a VARLEN message woohooo");
                                 return Ok(Some(Message::Ping));
                             }
                             _ => {
                                 return Err(ParseError::InvalidEncoding);
                             }
                         }
-                    },
+                    }
                     b'*' => {
-                        let content = String::from_utf8(src[2..frame_length-2].to_vec()).unwrap();
+                        let content = String::from_utf8(src[2..frame_length - 2].to_vec()).unwrap();
 
-                        println!("CONTENT: {content}");
                         src.advance(frame_length);
-                        return Ok(Some(Message::Info(content)))
-
-                    },
+                        return Ok(Some(Message::Info(content)));
+                    }
                     _ => {
                         return Err(ParseError::InvalidEncoding);
                     }
@@ -115,6 +120,14 @@ impl Decoder for MessageCodec {
 
 const MAX_FRAME_LENGTH: usize = 64; // 64 bytes
 
+fn get_u8(src: &mut Cursor<&[u8]>) -> Option<u8> {
+    if !src.has_remaining() {
+        None
+    } else {
+        Some(src.get_u8())
+    }
+}
+
 impl Message {
     pub fn check(src: &mut Cursor<&[u8]>) -> Result<(), ParseError> {
         if !src.has_remaining() {
@@ -131,9 +144,12 @@ impl Message {
                 }
             }
             b'*' => {
-                let specified_message_length = src.get_u8();
-                conservative_scan_for_delimiter(src, specified_message_length as usize)?;
-                return Ok(());
+                if let Some(specified_message_length) = get_u8(src) {
+                    conservative_scan_for_delimiter(src, specified_message_length as usize)?;
+                    return Ok(());
+                } else {
+                    return Err(ParseError::Incomplete);
+                }
             }
             _ => Err(ParseError::InvalidEncoding),
         }
@@ -162,7 +178,7 @@ fn conservative_scan_for_delimiter<'a>(
 
     // Sanity check, is the specified length within boundaries
     if specified_length > MAX_FRAME_LENGTH {
-        println!("specified length too big!");
+        info!("specified length too big!");
         return Err(ParseError::InvalidEncoding);
     }
 
@@ -196,7 +212,7 @@ fn conservative_scan_for_delimiter<'a>(
     if inner_buffer[index_start + specified_length] != b'\r'
         && inner_buffer[index_start + specified_length + 1] != b'\n'
     {
-        println!("no delimiter");
+        info!("no delimiter");
         return Err(ParseError::InvalidEncoding);
     } else {
         // Here, we could perform additional protocol checks
@@ -205,12 +221,10 @@ fn conservative_scan_for_delimiter<'a>(
     }
 }
 
+/// Scans a buffer, looking for a delimiter.
 fn scan_for_delimiter<'a>(src: &mut Cursor<&'a [u8]>) -> Result<&'a [u8], ParseError> {
     let start = src.position() as usize;
     let end = src.get_ref().len() - 1;
-
-    let offset_end = end - 2;
-    let length = end - start;
 
     for i in start..end {
         if src.get_ref()[i] == b'\r' && src.get_ref()[i + 1] == b'\n' {
