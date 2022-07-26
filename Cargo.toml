@@ -10,6 +10,10 @@ name = "msg"
 path = "src/send_msg.rs"
 
 [[bin]]
+name = "slow_msg"
+path = "src/send_slow_msg.rs"
+
+[[bin]]
 name = "bad_msg"
 path = "src/send_invalid_msg.rs"
 
@@ -34,3 +38,5 @@ anyhow = "1.0.58"
 thiserror = "1"
 tokio-util = { version = "0.7.3", features = [ "codec" ]}
 futures = "0.3.21"
+tracing-subscriber = "0.3.15"
+tracing = "0.1.35"
