@@ -29,6 +29,10 @@ path = "src/send_big_valid_msg.rs"
 name = "big_invalid"
 path = "src/send_big_invalid_msg.rs"
 
+[[bin]]
+name = "send_lots"
+path = "src/send_lots.rs"
+
 
 [dependencies]
 tokio = { version = "1.18.2", features = ["full"] }
