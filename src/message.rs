@@ -1,14 +1,15 @@
 use anyhow;
-use tracing::info;
 use bytes::{Buf, BufMut, BytesMut};
 use std::io::{self, Cursor};
 use thiserror;
 use tokio_util::codec::{Decoder, Encoder};
+use tracing::{error, info, warn};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug)]
 pub enum Message {
+    Heartbeat(u32),
     Ping,
     Pong,
     Info(String),
@@ -54,6 +55,10 @@ impl Encoder<Message> for MessageCodec {
                 dst.put_u8(b'*');
                 dst.put_u8(len);
                 dst.put_slice(s.as_bytes());
+            }
+            Message::Heartbeat(clock) => {
+                dst.put_u8(b'+');
+                dst.extend_from_slice(clock.to_le_bytes().as_slice());
             }
         }
 
@@ -103,6 +108,14 @@ impl Decoder for MessageCodec {
                         src.advance(frame_length);
                         return Ok(Some(Message::Info(content)));
                     }
+                    b'+' => {
+                        let clock: [u8; 4] = (&src[1..frame_length - 2])
+                            .try_into()
+                            .expect("clock slice to small");
+                        let clock = u32::from_le_bytes(clock);
+                        src.advance(frame_length);
+                        return Ok(Some(Message::Heartbeat(clock)));
+                    }
                     _ => {
                         return Err(ParseError::InvalidEncoding);
                     }
@@ -128,6 +141,14 @@ fn get_u8(src: &mut Cursor<&[u8]>) -> Option<u8> {
     }
 }
 
+fn get_u32(src: &mut Cursor<&[u8]>) -> Option<u32> {
+    if src.remaining() >= 4 {
+        Some(src.get_u32())
+    } else {
+        None
+    }
+}
+
 impl Message {
     pub fn check(src: &mut Cursor<&[u8]>) -> Result<(), ParseError> {
         if !src.has_remaining() {
@@ -146,6 +167,15 @@ impl Message {
             b'*' => {
                 if let Some(specified_message_length) = get_u8(src) {
                     conservative_scan_for_delimiter(src, specified_message_length as usize)?;
+                    return Ok(());
+                } else {
+                    return Err(ParseError::Incomplete);
+                }
+            }
+            b'+' => {
+                if get_u32(src).is_some() {
+                    src.set_position(1);
+                    conservative_scan_for_delimiter(src, 4)?;
                     return Ok(());
                 } else {
                     return Err(ParseError::Incomplete);
@@ -178,7 +208,7 @@ fn conservative_scan_for_delimiter<'a>(
 
     // Sanity check, is the specified length within boundaries
     if specified_length > MAX_FRAME_LENGTH {
-        info!("specified length too big!");
+        error!("specified length too big!");
         return Err(ParseError::InvalidEncoding);
     }
 
@@ -202,6 +232,7 @@ fn conservative_scan_for_delimiter<'a>(
     //
     let complete_raw_message_size = prefix_size + specified_length + delimiter_size;
     if buffer_length < complete_raw_message_size {
+        warn!("no complete frames found");
         return Err(ParseError::Incomplete);
     }
 
@@ -212,7 +243,7 @@ fn conservative_scan_for_delimiter<'a>(
     if inner_buffer[index_start + specified_length] != b'\r'
         && inner_buffer[index_start + specified_length + 1] != b'\n'
     {
-        info!("no delimiter");
+        error!("invalid protocol message!");
         return Err(ParseError::InvalidEncoding);
     } else {
         // Here, we could perform additional protocol checks

@@ -28,6 +28,7 @@ pub struct Peer {
     addr: SocketAddrV4,
     state: State,
     connection: Connection,
+    clock: u32,
 }
 
 impl Debug for Peer {
@@ -54,7 +55,12 @@ impl Peer {
             addr,
             state: State::Offline,
             connection: Connection::new(stream),
+            clock: 0,
         }
+    }
+
+    pub async fn heartbeat(&mut self) -> io::Result<()> {
+        self.connection.write_message(Message::Heartbeat(self.clock)).await
     }
 
     pub async fn ping(&mut self) -> io::Result<()> {

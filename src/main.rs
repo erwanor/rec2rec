@@ -10,12 +10,15 @@ use std::io::{self, Cursor};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::BufWriter;
 use tokio::sync::mpsc;
+use tokio::time::MissedTickBehavior;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     task::JoinError,
+    time,
 };
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -42,8 +45,13 @@ enum Command {
 
 async fn peer_handler(mut tx: Arc<mpsc::Sender<Command>>, mut peer: Peer) {
     peer.ping().await;
+    let mut ticker = time::interval(Duration::from_secs(4));
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
     loop {
-        match peer.read().await {
+        tokio::select! {
+            msg = peer.read() => {
+                match msg {
             Ok(Some(Message::Ping)) => {
                 // tx.send(Command::MessageReceived(peer.addr, Message::Ping));
                 peer.pong().await;
@@ -54,10 +62,18 @@ async fn peer_handler(mut tx: Arc<mpsc::Sender<Command>>, mut peer: Peer) {
             Ok(Some(Message::Info(msg))) => {
                 info!("peer_handler: received info {msg}");
             }
+            Ok(Some(Message::Heartbeat(clock))) => {
+                info!("heartbeat from {peer:?} with clock {clock}");
+            }
             Ok(None) => info!("peer_handler for {peer:?} Ok(None)'d"),
             Err(e) => {
                 info!("error: {e:?}");
                 break;
+            }
+        }
+            },
+            _ = ticker.tick() => {
+                peer.heartbeat().await;
             }
         }
     }
@@ -72,9 +88,8 @@ async fn client(mut tx: Arc<mpsc::Sender<Command>>, mut rx: mpsc::Receiver<Comma
                         info!("found new peer: {peer:?}");
                         tokio::spawn(peer_handler(tx.clone(), peer));
                     },
-                    Command::MessageReceived(from, msg) => {
-                        info!("{from:?} sent {msg:?}");
-                    },
+                    // Command::RemovePeer(addr) => {
+                    // }
                     _ => {},
                 }
             }
